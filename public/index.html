@@ -717,7 +717,11 @@ function switchTab(t){
   document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('on'));
   document.getElementById('tab-'+t).classList.add('on');
   dateEl.style.display = t==='historical' ? 'block':'none';
-  doSearch();
+  const loc=document.getElementById('locIn').value.trim();
+  if(!loc) return;
+  if(t==='current') fetchCurrent(loc);
+  else if(t==='historical') fetchHistorical(loc, dateEl.value);
+  else fetchMarine(loc);
 }
 document.getElementById('locIn').addEventListener('keydown',e=>{ if(e.key==='Enter') doSearch(); });
 
@@ -736,7 +740,6 @@ function getLocation(){
         document.getElementById('locIn').value=city;
         btn.disabled=false; btn.classList.remove('spinning');
         toast(`✅ ${city}`); doSearch();
-      } catch(e){ btn.disabled=false; btn.classList.remove('spinning'); doSearch(); }
     },
     err=>{
       btn.disabled=false; btn.classList.remove('spinning');
@@ -746,28 +749,78 @@ function getLocation(){
   );
 }
 
+/* ── Open-Meteo helpers ───────────────────────── */
+const GEO_URL = 'https://geocoding-api.open-meteo.com/v1/search';
+const HIST_URL = 'https://archive-api.open-meteo.com/v1/archive';
+const MARINE_URL = 'https://marine-api.open-meteo.com/v1/marine';
+
+async function geocode(query){
+  const r=await fetch(`${GEO_URL}?name=${encodeURIComponent(query)}&count=1&language=en&format=json`);
+  const d=await r.json();
+  if(!d.results?.length) throw new Error(`Location "${query}" not found`);
+  return d.results[0];
+}
+
+const WMO={0:['Clear sky','☀️'],1:['Mainly clear','🌤️'],2:['Partly cloudy','⛅'],3:['Overcast','☁️'],45:['Foggy','🌫️'],48:['Icy fog','🌫️'],51:['Light drizzle','🌦️'],53:['Drizzle','🌦️'],55:['Heavy drizzle','🌧️'],61:['Light rain','🌦️'],63:['Rain','🌧️'],65:['Heavy rain','🌧️'],71:['Light snow','🌨️'],73:['Snow','❄️'],75:['Heavy snow','❄️'],80:['Showers','🌦️'],81:['Showers','🌧️'],82:['Heavy showers','🌧️'],95:['Thunderstorm','⛈️'],96:['Thunderstorm','⛈️'],99:['Thunderstorm','⛈️']};
+const wmo=c=>WMO[c]||['Unknown','🌡️'];
+const windDir=d=>['N','NE','E','SE','S','SW','W','NW'][Math.round(d/45)%8];
+
 /* ── Search ───────────────────────────────────── */
 function doSearch(){
   const loc=document.getElementById('locIn').value.trim();
   if(!loc){ toast('Please enter a location'); return; }
-  if(activeTab==='current') fetchWeather('current',loc);
-  else if(activeTab==='historical') fetchWeather('historical',loc,dateEl.value);
-  else fetchWeather('marine',loc);
+  if(activeTab==='current') fetchCurrent(loc);
+  else if(activeTab==='historical') fetchHistorical(loc, dateEl.value);
+  else fetchMarine(loc);
 }
 
-/* ── API fetch ────────────────────────────────── */
-async function fetchWeather(endpoint,query,date=null){
+/* ── Current via Weatherstack proxy ──────────── */
+async function fetchCurrent(query){
   showLoading();
   try {
-    let url=`/api/weather?endpoint=${encodeURIComponent(endpoint)}&query=${encodeURIComponent(query)}`;
-    if(date) url+=`&date=${encodeURIComponent(date)}`;
+    const url=`/api/weather?endpoint=current&query=${encodeURIComponent(query)}`;
     const res=await fetch(url);
     if(!res.ok) throw new Error(`Server error ${res.status}`);
     const data=await res.json();
     if(data.error) throw new Error(data.error.info||'API error '+data.error.code);
-    if(endpoint==='current') renderCurrent(data);
-    else if(endpoint==='historical') renderHistorical(data);
-    else renderMarine(data);
+    renderCurrent(data);
+  } catch(e){ showError(e.message); }
+}
+
+/* ── Historical via Open-Meteo (free, no key) ── */
+async function fetchHistorical(query, date){
+  showLoading();
+  try {
+    const loc=await geocode(query);
+    const params=new URLSearchParams({
+      latitude:loc.latitude, longitude:loc.longitude,
+      start_date:date, end_date:date,
+      hourly:'temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,apparent_temperature',
+      daily:'temperature_2m_max,temperature_2m_min,temperature_2m_mean,precipitation_sum,sunshine_duration,uv_index_max,wind_speed_10m_max',
+      timezone:'auto'
+    });
+    const r=await fetch(`${HIST_URL}?${params}`);
+    const data=await r.json();
+    if(data.error) throw new Error(data.reason||'Historical data unavailable');
+    renderHistoricalOM(data, loc, date);
+  } catch(e){ showError(e.message); }
+}
+
+/* ── Marine via Open-Meteo (free, no key) ─────── */
+async function fetchMarine(query){
+  showLoading();
+  try {
+    const loc=await geocode(query);
+    const params=new URLSearchParams({
+      latitude:loc.latitude, longitude:loc.longitude,
+      current:'wave_height,wave_direction,wave_period,wind_wave_height,swell_wave_height,swell_wave_period,swell_wave_direction,ocean_current_velocity',
+      hourly:'wave_height,wave_direction,wave_period,wind_wave_height,swell_wave_height,water_temperature',
+      forecast_days:1, timezone:'auto'
+    });
+    const r=await fetch(`${MARINE_URL}?${params}`);
+    const data=await r.json();
+    if(data.error) throw new Error(data.reason||'Marine data unavailable for this location. Try a coastal city like Mumbai, Miami, or Sydney.');
+    renderMarineOM(data, loc);
   } catch(e){ showError(e.message); }
 }
 
@@ -791,7 +844,7 @@ function showError(msg){
   <div class="error-scene">
     <div class="err-icon">⚡</div>
     <div class="err-title">${esc(msg)}</div>
-    <div class="err-sub">Try cities like <b>Tokyo</b>, <b>London</b>, <b>Dubai</b>, <b>New York</b>.<br>Historical & Marine require a paid Weatherstack plan.</div>
+    <div class="err-sub">Try cities like <b>Tokyo</b>, <b>London</b>, <b>Dubai</b>, <b>New York</b>.<br>For Marine, use coastal cities like <b>Mumbai</b>, <b>Miami</b>, <b>Sydney</b>.</div>
   </div>`;
 }
 
@@ -898,109 +951,113 @@ function renderCurrent(data){
   `;
 }
 
-/* ── Render Historical ────────────────────────── */
-function renderHistorical(data){
-  const {location:l,historical}=data;
-  const dk=Object.keys(historical)[0];
-  const day=historical[dk];
-  const hourly=day.hourly||[];
-  const sunHrs=day.sunhour||'—';
+/* ── Render Historical (Open-Meteo) ───────────── */
+function renderHistoricalOM(data, loc, date){
+  const d=data.daily;
+  const h=data.hourly;
+  const sunHrs=d.sunshine_duration?.[0]?(d.sunshine_duration[0]/3600).toFixed(1):'—';
+  const fmtTime=iso=>new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 
   document.getElementById('content').innerHTML=`
   <div class="hist-hero">
     <div class="hist-top">
       <div class="hist-big-card">
         <div class="hist-icon">❄️</div>
-        <div class="hist-temp-val">${day.mintemp}°</div>
+        <div class="hist-temp-val">${Math.round(d.temperature_2m_min[0])}°</div>
         <div class="hist-temp-label">Min Temperature</div>
       </div>
       <div class="hist-big-card highlight">
         <div class="hist-icon">🌡️</div>
-        <div class="hist-temp-val">${day.avgtemp}°</div>
+        <div class="hist-temp-val">${Math.round(d.temperature_2m_mean[0])}°</div>
         <div class="hist-temp-label">Average Temperature</div>
       </div>
       <div class="hist-big-card">
         <div class="hist-icon">🔥</div>
-        <div class="hist-temp-val">${day.maxtemp}°</div>
+        <div class="hist-temp-val">${Math.round(d.temperature_2m_max[0])}°</div>
         <div class="hist-temp-label">Max Temperature</div>
       </div>
     </div>
 
     <div style="margin-bottom:16px;font-size:14px;color:var(--text-2)">
-      📍 <b>${esc(l.name)}, ${esc(l.country)}</b> &nbsp;·&nbsp; ${esc(dk)}
+      📍 <b>${esc(loc.name)}, ${esc(loc.country_code||'')}</b> &nbsp;·&nbsp; ${esc(date)}
     </div>
 
     <div class="hist-stats-row">
       ${[
-        ['🌨️','Snowfall',day.totalsnow+' cm'],
+        ['🌧️','Precipitation',d.precipitation_sum[0]+' mm'],
         ['☀️','Sunshine',sunHrs+' hrs'],
-        ['🌬️','UV Index Max',day.uvIndex||'—'],
-        ['💨','Max Wind',(hourly[0]?.windspeedKmph||'—')+' km/h'],
-        ['🌧️','Rain Chance',(hourly[0]?.chanceofrain||'—')+'%'],
-        ['💧','Humidity',(hourly[0]?.humidity||'—')+'%'],
+        ['🌬️','UV Index Max',d.uv_index_max?.[0]??'—'],
+        ['💨','Max Wind',Math.round(d.wind_speed_10m_max[0])+' km/h'],
+        ['📍','Latitude',loc.latitude.toFixed(4)],
+        ['📍','Longitude',loc.longitude.toFixed(4)],
       ].map(([ico,lbl,val])=>`
       <div class="hist-stat">
         <div class="hs-icon">${ico}</div>
         <div class="hs-lbl">${lbl}</div>
-        <div class="hs-val">${esc(val)}</div>
+        <div class="hs-val">${esc(String(val))}</div>
       </div>`).join('')}
     </div>
 
-    ${hourly.length ? `
+    ${h?.time?.length ? `
     <div class="hourly-section" style="opacity:1">
       <div class="section-label">Hourly Breakdown</div>
       <div class="hourly-track">
-        ${hourly.map(h=>`
-        <div class="h-card">
-          <div class="h-time">${fmtH(h.time)}</div>
-          <div class="h-icon">${wi(h.weatherCode)}</div>
-          <div class="h-temp">${h.tempC}°</div>
-          <div class="h-rain">🌧️ ${h.chanceofrain}%</div>
-          <div class="h-wind">💨 ${h.windspeedKmph}</div>
-        </div>`).join('')}
+        ${h.time.map((t,i)=>{
+          const [,ico]=wmo(h.weather_code[i]);
+          return `<div class="h-card">
+            <div class="h-time">${fmtTime(t)}</div>
+            <div class="h-icon">${ico}</div>
+            <div class="h-temp">${Math.round(h.temperature_2m[i])}°</div>
+            <div class="h-rain">💧 ${h.relative_humidity_2m[i]}%</div>
+            <div class="h-wind">💨 ${Math.round(h.wind_speed_10m[i])}</div>
+          </div>`;
+        }).join('')}
       </div>
     </div>` : ''}
   </div>`;
 }
 
-/* ── Render Marine ────────────────────────────── */
-function renderMarine(data){
-  const {location:l,marine}=data;
-  const dk=Object.keys(marine)[0];
-  const day=marine[dk];
-  const hourly=day.hourly||[];
-  const f=hourly[0]||{};
+/* ── Render Marine (Open-Meteo) ───────────────── */
+function renderMarineOM(data, loc){
+  const c=data.current;
+  const h=data.hourly;
+  const now=new Date().toISOString().slice(0,13);
+  const hi=h.time.findIndex(t=>t.startsWith(now));
+  const slice=h.time.slice(Math.max(0,hi),Math.max(0,hi)+12);
+  const fmtTime=iso=>new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 
   document.getElementById('content').innerHTML=`
   <div class="marine-hero">
     <div class="wave-display">
       <div class="wave-bg"></div>
       <div style="margin-bottom:20px;font-size:12px;letter-spacing:3px;text-transform:uppercase;color:rgba(0,180,255,.5)">
-        📍 ${esc(l.name)}, ${esc(l.country)} &nbsp;·&nbsp; ${esc(dk)}
+        📍 ${esc(loc.name)}, ${esc(loc.country_code||'')} &nbsp;·&nbsp; Live Conditions
       </div>
       <div class="wave-main">
         <div style="display:flex;align-items:flex-start">
-          <div class="wave-height-big">${f.sigHeight_m||'—'}</div>
+          <div class="wave-height-big">${c.wave_height??'—'}</div>
           <div class="wave-unit">m</div>
         </div>
         <div class="wave-meta">
           <div class="wave-label">Wave Height</div>
-          <div class="wave-desc">🌊 Period: ${f.swellPeriod_secs||'—'}s</div>
-          <div style="font-size:13px;color:rgba(0,180,255,.5);margin-top:4px">Direction: ${f.swellDir||'—'}° · Swell ${f.swellHeight_m||'—'}m</div>
+          <div class="wave-desc">🌊 Period: ${c.wave_period??'—'}s</div>
+          <div style="font-size:13px;color:rgba(0,180,255,.5);margin-top:4px">
+            Dir: ${c.wave_direction??'—'}° ${windDir(c.wave_direction??0)} · Swell ${c.swell_wave_height??'—'}m
+          </div>
         </div>
       </div>
     </div>
 
     <div class="marine-grid">
       ${[
-        ['🌊','Wave Height',(f.sigHeight_m||'—')+' m'],
-        ['🔄','Swell Height',(f.swellHeight_m||'—')+' m'],
-        ['⏱️','Swell Period',(f.swellPeriod_secs||'—')+' s'],
-        ['🧭','Swell Dir',(f.swellDir||'—')+'°'],
-        ['🌡️','Water Temp',(f.waterTemp_C||'—')+'°C'],
-        ['💨','Wind Speed',(f.windspeedKmph||'—')+' km/h'],
-        ['🌬️','Wind Dir',esc(f.winddir16Point||'—')],
-        ['👁️','Visibility',(f.visibility||'—')+' km'],
+        ['🌊','Wave Height',(c.wave_height??'—')+' m'],
+        ['⏱️','Wave Period',(c.wave_period??'—')+' s'],
+        ['🧭','Wave Dir',(c.wave_direction??'—')+'° '+windDir(c.wave_direction??0)],
+        ['💨','Wind Wave',(c.wind_wave_height??'—')+' m'],
+        ['🔄','Swell Height',(c.swell_wave_height??'—')+' m'],
+        ['⏳','Swell Period',(c.swell_wave_period??'—')+' s'],
+        ['🧭','Swell Dir',(c.swell_wave_direction??'—')+'° '+windDir(c.swell_wave_direction??0)],
+        ['🌀','Ocean Current',c.ocean_current_velocity!=null?(c.ocean_current_velocity.toFixed(2)+' m/s'):'—'],
       ].map(([ico,lbl,val])=>`
       <div class="marine-card">
         <div class="mc-icon">${ico}</div>
@@ -1009,25 +1066,27 @@ function renderMarine(data){
       </div>`).join('')}
     </div>
 
-    ${hourly.length ? `
+    ${slice.length ? `
     <div class="hourly-section" style="opacity:1">
       <div class="section-label">Hourly Marine Forecast</div>
       <div class="hourly-track">
-        ${hourly.map(h=>`
-        <div class="h-card">
-          <div class="h-time">${fmtH(h.time)}</div>
-          <div class="h-icon">🌊</div>
-          <div class="h-temp">${h.sigHeight_m}m</div>
-          <div class="h-rain">🌡️ ${h.waterTemp_C}°</div>
-          <div class="h-wind">💨 ${h.windspeedKmph}</div>
-        </div>`).join('')}
+        ${slice.map(t=>{
+          const i=h.time.indexOf(t);
+          return `<div class="h-card">
+            <div class="h-time">${fmtTime(t)}</div>
+            <div class="h-icon">🌊</div>
+            <div class="h-temp">${h.wave_height[i]}m</div>
+            <div class="h-rain">⏱️ ${h.wave_period[i]}s</div>
+            <div class="h-wind">🌡️ ${h.water_temperature?.[i]??'—'}°</div>
+          </div>`;
+        }).join('')}
       </div>
     </div>` : ''}
   </div>`;
 }
 
 /* ── Init ─────────────────────────────────────── */
-fetchWeather('current','Mumbai');
+fetchCurrent('Mumbai');
 </script>
 </body>
 </html>
