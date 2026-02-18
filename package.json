@@ -1,0 +1,6 @@
+{
+  "name": "aether-weather",
+  "version": "1.0.0",
+  "description": "Glassmorphic weather app powered by Weatherstack",
+  "engines": { "node": ">=18" }
+}
